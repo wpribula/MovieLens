@@ -1,0 +1,341 @@
+---
+title: "MovieLens project for PH125.9x - Data Science"
+author: "Wojciech Pribula"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    number_sections: true
+    extra_dependencies: ["float"]
+---
+
+```{r setup, include=FALSE}
+library(caret)
+library(tidyverse)
+load('myEnvironment.RData')
+```
+
+\vspace{40px}
+
+\begin{enumerate}
+  \item Introduction
+  \item Training data analysis
+  \item Final data model and training
+  \item Results
+  \item Conclusion
+\end{enumerate}
+
+\vspace{40px}
+
+# Introduction
+Main objective of this project is to build model for movies' rating prediction. This can be useful for recommendation system similar as is implemented on Netflix where Netflix wants to be able to predict if user may like specific movie.
+
+Available training data contains `r nrow(edx)` individual ratings. Each rating has, user ID, movie ID, movie title (with year included), movie genres (may have more than one), time stamp of a rating and finally rating itself. These are data which are usually available in each movies database and it should be determined if these are enough to do some predictions.
+
+Example of data:
+```{r, echo=TRUE}
+head(edx)
+```
+
+Training data are named edx and these data should be used for training. There is second collection with `r nrow(validation)` entries too, these data can't be used in the training and should used only for validation of predictions.
+
+Quality of prediction should be evaluated with use of RMSE (Root-mean-square deviation) when we want to have as smallest number as possible.
+
+\[RMSE = sqrt(\frac{\sum_{i=1}^{N}(x_i-\hat{x}_i)^2}{N})\]
+\begin{description}
+  \item  $N$ ... number of observations \\
+  \item  $x_i$ ... original value \\
+  \item  $\hat{x}_i$ ... predicted value
+\end{description}
+
+# Training data analysis
+Data set needs to be analyzed first from point of view of each value and their relationships. Movies are easier as this topic is well known and it can be said, what should have influence on prediction, based on personal experience.
+
+## First assumptions about method
+Some method should be chosen and analyzed on the beginning of this project, if it is suitable or not. If it is not then other method must be analyzed.
+
+It seems that all predictors have some influence on the rating. It is well known that some movies are better and some are not that good so individual movie rating should be strong predictor. It is expected that some individual preferences should play role too and that different users prefer different genres.
+
+It can be assumed that predicted rating is just most common rating (average of all ratings) plus some bias. Bias can be one or more, in this case it can be expected to have more biases, one for each predictor.
+
+Following statements above first estimation of model may look like this:
+\[Y = average + bias_{movie} + bias_{user} + bias_{year} + bias_{usergenre} + bias_{genre} \]
+\begin{description}
+  \item $average$ ... average rating for all data\\
+  \item $bias_{movie}$ ... bias for individual movie - better OR worse movies \\
+  \item $bias_{user}$ ... user bias - represents tendency of user to be picky or generous \\
+  \item $bias_{year}$ ... bias for year of movie release \\
+  \item $bias_{usergenre}$ ... this should represent users genre preference \\
+  \item $bias_{genre}$ ... some genres may be rated better as they may be more popular
+\end{description}
+
+## Average
+Distribution of ratings and average should provide some basic idea about data set.
+```{r, echo=FALSE, fig.cap = "Ratings distribution with marked mean.", fig.align='center', out.width = "50%", fig.pos='H'}
+miu = mean(edx$rating)
+# PLOT ratings distribution
+plot_rating_distribution <- edx %>% ggplot(aes(rating)) + 
+  geom_histogram(binwidth=.5, colour="black", fill="white") + 
+  geom_vline(xintercept=miu, color="red", size=1) + 
+  ggtitle("Ratings distribution with marked mean")
+plot_rating_distribution
+```
+If rating should be predicted as global average then rating is `r miu` and RMSE for this is `r rmse_results$RMSE[1]`. This is value which should be beaten by prediction model as this is the simplest prediction.
+
+## Movie bias
+Distribution of movie ratings suggests that most movies are rated around the average, but there is big group of movies rated better and worse, so this should be very good predictor.
+```{r, echo=FALSE, fig.cap = "Count of movies in rating categorie.", fig.align='center', out.width = "50%", fig.pos='H'}
+# Prepare count of movies ratings and average rating rounded to nearest .5
+movies <- edx %>% group_by(movieId) %>% 
+  summarise(n = n(), 
+            mean_rating = mean(rating),
+            mean_rating_rounded = round(mean(rating)/0.5,0)*0.5)
+# PLOT count of movies in rating categories
+plot_movies_count_in_rating_cat <- movies %>% ggplot(aes(mean_rating)) + 
+  geom_histogram(aes(y=..count..), binwidth = .5, colour="red", size=1, fill="white") + 
+  ggtitle("Count of movies in rating categories") + 
+  xlab("Average rating") + 
+  ylab("Movies count")
+plot_movies_count_in_rating_cat
+```
+Another factor which should be taken in count is fact that very high rated movies have only few ratings what may suggest that these are rather niche movies picked by users who already like this kind of movies, so these movies ratings may not be accurate, when generalized on bigger population. It can be similar for bad movies, however these are naturally less watched so less rated, so this is not visible in the plot.
+```{r echo=FALSE, fig.align='center', fig.cap="Count of movie ratings in movies' average rating category.", out.width = "70%", fig.pos='H'}
+# PLOT smooth number rating on count of ratings
+plot_movie_boxplot_rating_count_in_rating_cat <- movies %>% 
+  ggplot(aes(mean_rating_rounded, n, group = mean_rating_rounded, color = mean_rating_rounded)) + 
+  geom_boxplot() + 
+  ggtitle("Count of movie ratings in movies' average rating category") + 
+  xlab("Average rating") + 
+  ylab("Count of ratings") + 
+  scale_color_gradient(low="black", high="red")
+plot_movie_boxplot_rating_count_in_rating_cat
+```
+
+## User bias
+User bias can be seen in users average rating distribution. It can be seen that most users rate around average but some users may have strong bias what makes it good predictor.
+```{r, echo=FALSE, fig.cap = "Count of users in rating categories.", fig.align='center', out.width = "70%", fig.pos='H'}
+users <- edx %>% group_by(userId) %>% summarise(n = n(), mean_rating = mean(rating))
+plot_user_count_in_rating_cat <- users %>% ggplot(aes(mean_rating)) + 
+  geom_histogram(aes(y=..count..), binwidth = .5, colour="blue", size=1, fill="white") + 
+  ggtitle("Count of users in rating categories") + 
+  xlab("Average rating") + 
+  ylab("Users count")
+plot_user_count_in_rating_cat
+```
+What can be expected is that users with only few ratings are not well represented by their average rating as there is not enough data to tell anything about their preferences or bias. It is confirmed by following plot where users with less ratings have wider spread of ratings, with more ratings per user ratings incline to average.
+```{r, echo=FALSE, fig.cap = "Spread of user's average rating based on number of ratings provided by user.", fig.align='center', out.width = "70%", fig.pos='H'}
+# PLOT number of ratings and rating spread
+plot_user_rating_on_count_of_ratings <- users %>% ggplot(aes(n, mean_rating)) + 
+  geom_point(color = "blue", alpha = 0.1, shape = 1) + 
+  ggtitle("Spread of user's average rating based on number of ratings provided by user") + 
+  xlab("Number of ratings (log10)") + 
+  ylab("Average user rating") + 
+  scale_x_log10()
+plot_user_rating_on_count_of_ratings
+```
+
+## Year bias
+Year when movie was released can have some influence on the rating, this can be confirmed using following plot.
+```{r, echo=FALSE, fig.cap = "Average ratings in years.", fig.align='center', out.width = "50%", fig.pos='H'}
+years <- edx %>% group_by(year) %>% summarise(n = n(), mean_rating = mean(rating))
+# PLOT average rating based on year
+plot_mean_rating_in_year <- years %>% ggplot(aes(year, mean_rating)) +
+  geom_point(colour="darkgreen") + 
+  ggtitle("Average ratings in years") + 
+  xlab("Year") + 
+  ylab("Average rating") + 
+  theme(axis.text.x = element_text(angle = 90))
+plot_mean_rating_in_year
+```
+Clear dependency can be be seen, people probably prefer newer movies, or old movies lovers are more picky and rate more harder. This would be great addition to prediction model. 
+
+\clearpage
+
+## Genre Bias
+First what must be done is separation of genres from list of genres for individual movies. Then genres ratings can be inspected in the box plot.
+```{r, echo=FALSE, fig.cap = "Ratings by genre.", fig.align='center', out.width = "70%", fig.pos='H'}
+edx_genres <- edx %>% separate_rows(genres, sep = "\\|") 
+genres <- edx_genres %>% group_by(genres) %>% summarise(n = n(), mean_rating = mean(rating))
+# PLOT ratings by genres
+plot_genre_boxplot_rating_by_genre <- edx_genres %>% 
+  ggplot(aes(genres, rating, group = genres, fill = genres)) + 
+  geom_boxplot() + 
+  ggtitle("Ratings by genre") + 
+  xlab("Genre") + 
+  ylab("Rating") + 
+  theme(axis.text.x = element_text(angle = 90))
+plot_genre_boxplot_rating_by_genre
+```
+It is clear that some genres receive different ratings on average than others and taking in count genre can enhance final prediction.
+Prediction should be careful as data do not provide the same size of sample for all genres.
+```{r, echo=FALSE, fig.cap = "Ratings count by genre.", fig.align='center', out.width = "70%", fig.pos='H'}
+# PLOT count of ratings by genre
+plot_ratings_count_by_genre <- edx_genres %>% ggplot(aes(genres)) + 
+  stat_count(color = "violet", fill = "white") +
+  ggtitle("Ratings count by genre") + 
+  xlab("Genre") + 
+  ylab("Rating") + 
+  theme(axis.text.x = element_text(angle = 90))
+plot_ratings_count_by_genre
+```
+## User and genre bias
+This should be predictor based on combination of user and genre as experience suggests that some users may like some genres more than other.
+This can be seen on the plot of selected five users with biggest number of ratings.
+```{r, echo=FALSE, fig.cap = "Ratings by genres and user.", fig.align='center', fig.width=9.5, out.height= "70%", fig.pos='H'}
+# PLOT ratings by genres and user
+most_rating_users <- users %>% arrange(desc(n)) %>% .$userId
+most_rating_users <- most_rating_users[1:5]
+user_genres <- edx_genres %>% 
+  filter(userId %in% most_rating_users) %>% 
+  group_by(genres, userId)
+  
+plot_user_genre_boxplot <- user_genres %>% 
+  ggplot(aes(genres, rating, fill = genres)) + 
+  geom_boxplot() + 
+  ggtitle("Ratings by genres and user") + 
+  xlab("Genre") + 
+  ylab("Rating") + 
+  theme(axis.text.x = element_text(angle = 90)) + 
+  facet_grid(~userId)
+plot_user_genre_boxplot
+```
+Genre preferences can be clearly observed for all users expect the first one which is very consistent in ratings across genres. Second and fifth user present very clear overall individual bias too what is supporting claim from user bias chapter.
+
+# Final data model and training
+There is clear bias for all described categories and all of them can improve prediction. What must be taken in count is fact that some movies have more genres than one, so model should be corrected.
+\[Y = average + bias_{movie} + bias_{user} + bias_{year} + frac{1}{N_g}\sum_{i=0}^{N_g}bias_{usergenre,i} + frac{1}{N_g}\sum_{i=0}^{N_g}bias_{genre,i} \]
+\begin{description}
+  \item $average$ ... average rating for all data\\
+  \item $bias_{movie}$ ... individual movie influence - better OR worse movie \\
+  \item $bias_{user}$ ... user bias represents tendency of use to be picky or generous \\
+  \item $bias_{year}$ ... predicted value \\
+  \item $bias_{usergenre}$ ... this should represent users genre preference \\
+  \item $bias_{genre}$ ... some genres may be rated better as they may be more popular \\
+  \item $N_g$ ... number of genres 
+\end{description}
+
+## Biases training
+Bias should be calculated as average of ratings differences from global average for individual categories. As there is influence of small groups of ratings average can be hardened by $\alpha$ parameter which can be tuned.
+\[Bias_{cat} = \frac{1}{\alpha + N}\sum_{i=0}^{N}(rating_i - \mu)\]
+\begin{description}
+  \item $\alpha$ ... tuning parameter\\
+  \item $N$ ... number of ratings for category \\
+  \item $rating_i$ ... individual ratings \\
+  \item $\mu$ ... global ratings average
+\end{description}
+Parameter $\alpha|$ should be tuned with use of RMSE function and results of tuning should be presented in the result schapter. Calculation of RMSE is possible as train data can be divided into training and test sets. Data set edx can be divided 1:4 (test:train).
+
+
+## Cross checking (Ensemble model)
+As division of edx is random cross checking can be done with applying training process multiple times. Final model may be calculated as combination of multiple models:
+
+One possibility, which is used in this project, is average from all individual models.
+\[M = \frac{1}{N} \sum_{i=1}^{N}M_i\]
+\begin{description}
+  \item $N$ ... number of models \\
+  \item $M_i$ ... individual models
+\end{description}
+
+\clearpage
+
+# Results
+Final precision for current data is:
+\[RMSE = `r RMSE` \]
+
+However if three training runs are compared some issues can be observed.
+
+Three training runs were run. Each include 5 individual models. Different random seed was used to produce different train and test sets from edx. Here are RMSE for all models by training run. Final RMSE of ensembled model is marked with a line. It can be seen that ensembled model usually enhances individual models.
+```{r, echo=FALSE, fig.cap = "RMSE for 5 models in mulliple trainings - lines show final RMSE of ensembled model.", fig.align='center', out.height= "70%", fig.pos='H'}
+RMSE_models_5 <- data.frame(Training = 1, Model = 1:5, RMSE = c(0.8550737, 0.8509234, 0.8531406, 0.8497100, 0.8530691))
+RMSE_models_5 <- rbind(RMSE_models_5,data.frame(Training = 2, Model = 1:5, RMSE = c(0.8530880, 0.8496918, 0.8509584, 0.8496056, 0.8495073)))
+RMSE_models_5 <- rbind(RMSE_models_5,data.frame(Training = 3, Model = 1:5, RMSE = c(0.8497323, 0.8498167, 0.8549732, 0.8550624, 0.8551870)))
+plot_models_5 <- RMSE_models_5 %>% ggplot(aes(Model, RMSE, color=factor(Training))) + 
+  geom_point(size = 5, shape = 16) +
+  geom_line(size = 1) + 
+  geom_hline(yintercept = 0.8507466, color = "red", size = 1) +
+  geom_hline(yintercept = 0.8487631, color = "green", size = 1) +
+  geom_hline(yintercept = 0.8509947, color = "blue", size = 1) +
+  ggtitle("RMSE for 5 models in mulliple trainings - lines show final RMSE of ensembled model") + 
+  xlab("Model") + 
+  ylab("RMSE")
+plot_models_5
+```
+This is how it looks for 1 to 5 ensembled models. It can be see that 5 models is usually good prediction and that final model is better when 5 models is ensemled, however for model 3 it is clear that adding more and more models make predictions worse, it is caused by adding worse models, if order of models adding would change from 5 to 1 the line would be declining.
+```{r, echo=FALSE, fig.cap = "RMSE for number of ensembled models in multiple trainings.", fig.align='center', out.height= "70%", fig.pos='H'}
+RMSE_models_5_cumulative <- data.frame(Training = 1, Model = 1:5, RMSE = c(0.8550737, 0.8521229, 0.8520559, 0.8505198, 0.8507466))
+RMSE_models_5_cumulative <- rbind(RMSE_models_5_cumulative,data.frame(Training = 2, Model = 1:5, RMSE = c(0.8530880, 0.8502540, 0.8499987, 0.8492023, 0.8487631)))
+RMSE_models_5_cumulative <- rbind(RMSE_models_5_cumulative,data.frame(Training = 3, Model = 1:5, RMSE = c(0.8497323, 0.8487336, 0.8496196, 0.8504037, 0.8509947)))
+plot_models_5_cumulative <- RMSE_models_5_cumulative %>% ggplot(aes(Model, RMSE, color=factor(Training))) + 
+  geom_point(size = 5, shape = 16) + 
+  geom_line(size = 1) + 
+  ggtitle("RMSE for number of ensembled models in multiple trainings") + 
+  xlab("Number of ensembled models") + 
+  ylab("RMSE")
+plot_models_5_cumulative
+```
+It is clear that 5 models may perform worse than just one, however it is not clear which model of these five is the best, so making average of multiple models is safer than keeping just one.
+
+## Alpha tuning results
+Alpha tuning results can be examined in following plots. Alpha boundaries were configured based on experiments.
+```{r, echo=FALSE, fig.cap = "Alpha tuning for Movie bias.", fig.align='center', out.width="80%", fig.pos='H'}
+alpha_plots <- alpha_plots %>% mutate(Cycle = factor(Cycle))
+# >> Movie <<
+alpha_Movie <- alpha_plots %>% filter(Type == "Movie") %>% 
+  ggplot(aes(alpha, RMSE, group = Cycle, color = Cycle)) + 
+  geom_line(aes(group = Cycle)) + 
+  ggtitle("Alpha tuning for Movie bias") + 
+  xlab("ALPHA") + 
+  ylab("RMSE") + 
+  facet_grid(vars(Cycle), scales="free")
+alpha_Movie
+```
+```{r, echo=FALSE, fig.cap = "Alpha tuning for User bias.", fig.align='center', out.width="80%", fig.pos='H'}
+# >> User <<
+alpha_User <- alpha_plots %>% filter(Type == "User") %>% 
+  ggplot(aes(alpha, RMSE, group = Cycle, color = Cycle)) + 
+  geom_line() + 
+  ggtitle("Alpha tuning for User bias") + 
+  xlab("ALPHA") + 
+  ylab("RMSE") + 
+  facet_grid(vars(Cycle), scales="free")
+alpha_User
+```
+```{r, echo=FALSE, fig.cap = "Alpha tuning for Year bias.", fig.align='center', out.width="80%", fig.pos='H'}
+# >> Year <<
+alpha_Year <- alpha_plots %>% filter(Type == "Year") %>% 
+  ggplot(aes(alpha, RMSE, group = Cycle, color = Cycle)) + 
+  geom_line() + 
+  ggtitle("Alpha tuning for Year bias") + 
+  xlab("ALPHA") + 
+  ylab("RMSE") + 
+  facet_grid(vars(Cycle), scales="free")
+alpha_Year
+```
+```{r, echo=FALSE, fig.cap = "Alpha tuning for User and Genre bias.", fig.align='center', out.width="80%", fig.pos='H'}
+# >> User & Genre<<
+alpha_User_Genre <- alpha_plots %>% filter(Type == "User&Genre") %>% 
+  ggplot(aes(alpha, RMSE, group = Cycle, color = Cycle)) + 
+  geom_line() + 
+  ggtitle("Alpha tuning for User & Genre bias") + 
+  xlab("ALPHA") + 
+  ylab("RMSE") + 
+  facet_grid(vars(Cycle), scales="free")
+alpha_User_Genre
+```
+```{r, echo=FALSE, fig.cap = "Alpha tuning for Genre bias.", fig.align='center', out.width="80%", fig.pos='H'}
+# >> Genre<<
+alpha_Genre <- alpha_plots %>% filter(Type == "Genre") %>% 
+  ggplot(aes(alpha, RMSE, group = Cycle, color = Cycle)) + 
+  geom_line() + 
+  ggtitle("Alpha tuning for Genre bias") + 
+  xlab("ALPHA") + 
+  ylab("RMSE") + 
+  facet_grid(vars(Cycle), scales="free")
+alpha_Genre
+```
+# Conclusion
+Final precision is $RMSE = `r RMSE`$ however result could be better if more individual models would be trained and added to the ensembled model. It is always some kind of compromise between time for training and results.
+
+It is possible to come with some algorithm which couldbe working with bigger number of individual models, would be sorting them by precision on training data and use only top performing algorithms for final model. However this would require much more training time, however this is something what could be added as enhancement to the current project.
+
+Tuning of $\alpha$ parameter follows some predefined boundaries which were configured based on experiments, it would be interesting to do more investigation on this and observer influence of alpha tuning on final model performance.
+
